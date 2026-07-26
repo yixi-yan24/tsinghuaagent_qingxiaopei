@@ -102,11 +102,12 @@ TsingXiaoPeiAgent/
 │   ├── data_loader.py      # 长期记忆：解析培养方案 → 结构化数据
 │   ├── embedding.py        # 词嵌入引擎：语义搜索（sentence-transformers）
 │   ├── memory.py           # 短期记忆（对话历史）& 长期记忆（培养方案数据库）
-│   ├── tools.py            # 工具集：搜索、详情、要求检查
+│   ├── tools.py            # 工具集：搜索、详情、要求检查、排课、课程推荐
 │   ├── course_catalog.py   # 已整理课程资料的本地检索目录
+│   ├── course_graph.py     # 课程 DAG 拓扑排序算法
+│   ├── scheduler.py        # 智能排课引擎：基于约束优化的课程表自动生成
 │   ├── llm_client.py       # 统一的模型调用、超时与瞬时失败重试
 │   ├── prompts.py          # 系统提示词模板
-│   ├── course_graph.py     # 课程 DAG 拓扑排序算法
 │   ├── planner.py          # 修读计划生成
 │   └── multi_agent.py      # Multi-Agent 协同搜索与审核
 ├── api/
@@ -115,7 +116,7 @@ TsingXiaoPeiAgent/
 ├── Dockerfile & docker-compose.yml
 ├── run.py                  # 统一入口
 ├── curated_courses.json    # 课程介绍
-└── 2025级培养方案.pdf       # 培养方案源文件
+└── 2025级培养方案.md        # 培养方案源文件
 ```
 
 ### 设计要点
@@ -127,7 +128,8 @@ TsingXiaoPeiAgent/
 | **长期记忆** | 本科专业培养方案结构化数据 + 1000+ 门已整理的课程资料 |
 | **词嵌入** | 基于 `shibing624/text2vec-base-chinese` 的语义搜索，余弦相似度排序 |
 | **规划能力** | LLM 自主推理 + 拓扑排序双通道，考虑先修关系、开课学期、学分均衡 |
-| **工具集** | list_programs / search_programs / semantic_search / get_program_detail / check_requirements / multi_agent_search / search_courses / get_course_detail / list_program_courses |
+| **排课引擎** | 约束优化自动排课：支持先修关系 DAG、开课学期、学分上限（25/学期）、时间冲突检测、保研约束、已修课程排除 |
+| **工具集** | list_programs / search_programs / semantic_search / get_program_detail / check_requirements / multi_agent_search / search_courses / get_course_detail / list_program_courses / recommend_courses / generate_schedule |
 
 ---
 
@@ -164,10 +166,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 ## 配环境
 
-依赖：`fastapi`、`uvicorn`、`httpx`、`pydantic`、`sentence-transformers`、`pdfplumber`
+依赖：`fastapi`、`uvicorn`、`httpx`、`pydantic`、`sentence-transformers`
 
 ```bash
-pip install fastapi uvicorn httpx pydantic sentence-transformers pdfplumber
+pip install fastapi uvicorn httpx pydantic sentence-transformers
 ```
 
 > 首次运行词嵌入功能时会自动下载模型（约 400MB），国内已配置 HF 镜像加速。也可通过环境变量 `HF_ENDPOINT` 自定义镜像源。

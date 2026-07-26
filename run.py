@@ -67,9 +67,10 @@ def run_cli():
             print("用法: plan <专业> <年级> <培养方案名称>\n")
             continue
 
-        print("\n助手 > ", end="")
-        reply = session.process_message(user_input)
-        print(reply)
+        print("\n助手 > ", end="", flush=True)
+        for token in session.process_message_stream(user_input):
+            print(token, end="", flush=True)
+        print()
         print()
 
 

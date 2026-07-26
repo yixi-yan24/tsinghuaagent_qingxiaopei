@@ -180,9 +180,10 @@ class AgentSession:
     ) -> Generator[str, None, None]:
         """Streaming variant of _call_llm.
 
-        Buffers the LLM stream internally so tool calls can still be parsed
-        from the complete response.  Only the **final** turn (no tool call)
-        yields tokens to the caller — earlier turns are consumed silently.
+        Uses true SSE streaming from DeepSeek.  Buffers the first few tokens
+        to detect tool calls — if ``ACTION:`` appears early, the whole turn is
+        consumed silently and the tool is executed.  Otherwise tokens are
+        yielded progressively to the caller.
         """
         messages = self.stm.to_llm_format()
         tool_block = self._get_tool_block()
@@ -197,40 +198,51 @@ class AgentSession:
             else:
                 augmented_messages.append(msg)
 
-        # Buffer the entire stream so we can inspect it for tool calls.
-        buffer: list[str] = []
-        try:
-            for token in chat_completion_stream(
-                self.api_key, self.base_url, augmented_messages,
-                temperature=temperature, max_tokens=4096, timeout=90,
-            ):
-                buffer.append(token)
-        except Exception:
-            # Streaming failed — fall back to non-streaming call.
-            content = chat_completion(
-                self.api_key, self.base_url, augmented_messages,
-                temperature=temperature, max_tokens=4096, timeout=90, retries=1,
-            )
-            buffer = [content]
+        # Stream from DeepSeek — buffer just enough to detect tool calls.
+        TOOL_DETECT_WINDOW = 200  # chars to inspect before deciding
+        buffered: list[str] = []
+        is_tool_call = False
+        yielded = False
 
-        content = "".join(buffer)
+        for token in chat_completion_stream(
+            self.api_key, self.base_url, augmented_messages,
+            temperature=temperature, max_tokens=4096, timeout=90,
+        ):
+            if not is_tool_call:
+                buffered.append(token)
+                if "ACTION:" in "".join(buffered):
+                    # Tool call detected — keep buffering silently.
+                    is_tool_call = True
+                elif len("".join(buffered)) >= TOOL_DETECT_WINDOW:
+                    # Looks like a normal response — flush buffer progressively.
+                    if not yielded:
+                        yielded = True
+                        for t in buffered:
+                            yield t
+                    else:
+                        yield token
+            else:
+                buffered.append(token)
 
-        # Tool-use loop.
-        tool_result = self._parse_tool_call(content)
-        if tool_result:
-            if tool_calls >= 3:
-                yield "抱歉，查询所需的工具调用次数过多。请缩小问题范围后重试。"
+        if not yielded and not is_tool_call:
+            # Response shorter than detection window — just flush everything.
+            for t in buffered:
+                yield t
+
+        content = "".join(buffered)
+
+        # Check if the LLM wants to use a tool
+        if is_tool_call:
+            tool_result = self._parse_tool_call(content)
+            if tool_result:
+                if tool_calls >= 3:
+                    yield "抱歉，查询所需的工具调用次数过多。请缩小问题范围后重试。"
+                    return
+                tool_name, params = tool_result
+                result = self._execute_tool(tool_name, params)
+                self.stm.add("tool", result, tool_name=tool_name)
+                yield from self._call_llm_stream(temperature, tool_calls + 1)
                 return
-            tool_name, params = tool_result
-            result = self._execute_tool(tool_name, params)
-            self.stm.add("tool", result, tool_name=tool_name)
-            yield from self._call_llm_stream(temperature, tool_calls + 1)
-            return
-
-        # Final response — stream cleaned content in readable chunks.
-        cleaned = self._clean_response(content)
-        for start in range(0, len(cleaned), 64):
-            yield cleaned[start:start + 64]
 
     # ── helpers ─────────────────────────────────────────────────────────
 
