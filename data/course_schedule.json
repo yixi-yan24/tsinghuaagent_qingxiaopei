@@ -1,0 +1,50 @@
+[
+  {
+    "_comment": "清华大学课程时间数据 — 待后续填充",
+    "_format": {
+      "course_id": "...",
+      "name": "...",
+      "options": [
+        {
+          "class_id": "A班",
+          "slots": [
+            {
+              "day": 1,
+              "start_period": 1,
+              "end_period": 2,
+              "weeks": "1-16"
+            }
+          ]
+        }
+      ]
+    },
+    "_example": {
+      "course_id": "30240184",
+      "name": "数据结构",
+      "options": [
+        {
+          "class_id": "A班",
+          "slots": [
+            {
+              "day": 1,
+              "start_period": 1,
+              "end_period": 2,
+              "weeks": "1-16"
+            }
+          ]
+        },
+        {
+          "class_id": "B班",
+          "slots": [
+            {
+              "day": 2,
+              "start_period": 3,
+              "end_period": 4,
+              "weeks": "1-16"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

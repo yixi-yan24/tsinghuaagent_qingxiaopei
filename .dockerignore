@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.git/
+.gitignore
+*.pdf
+*.md
+!2025级培养方案.md
+data/programs.json
+.config
+.DS_Store
+test_*.py
+*.log
