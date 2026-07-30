@@ -2,6 +2,10 @@ import json, os, re, time
 from collections.abc import Generator
 from typing import Any
 
+# Conda 有时会设置指向不存在的 SSL_CERT_FILE，导致 httpx 启动失败
+if "SSL_CERT_FILE" in os.environ and not os.path.isfile(os.environ["SSL_CERT_FILE"]):
+    del os.environ["SSL_CERT_FILE"]
+
 import httpx
 
 # ── Errors that are worth retrying (transient) vs. those that aren't ────
