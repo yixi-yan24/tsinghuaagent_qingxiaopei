@@ -163,17 +163,47 @@ def load_programs(force_reload: bool = False) -> list[TrainingProgram]:
 
 
 def get_program_by_name(name: str, programs: list[TrainingProgram]) -> Optional[TrainingProgram]:
-    """Find a training program by name (partial match)."""
+    """Find a training program by name or department, with graded fallback.
+
+    Resolution order:
+      1. name exact/substring match
+      2. department exact/substring match
+      3. keyword-in-name match
+      4. keyword-in-department match
+      5. semantic search (embedding) — lazy-loaded, only if needed
+    """
     name = name.strip()
     if not name:
         return None
+
+    # 1 — name match
     for m in programs:
         if name in m.name or m.name in name:
             return m
+    # 2 — department match
+    for m in programs:
+        if name in m.department or m.department in name:
+            return m
+    # 3 — keyword in name
     for m in programs:
         for kw in name.split():
             if kw in m.name:
                 return m
+    # 4 — keyword in department
+    for m in programs:
+        for kw in name.split():
+            if kw in m.department:
+                return m
+
+    # 5 — semantic search (lazy, so no impact on startup)
+    try:
+        from .embedding import semantic_search as _semantic_search
+        results = _semantic_search(name, programs, top_k=1)
+        if results and results[0][1] >= 0.5:
+            return results[0][0]
+    except Exception:
+        pass
+
     return None
 
 

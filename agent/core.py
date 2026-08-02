@@ -38,7 +38,6 @@ class TrainingPlanAgent:
             planner=self.planner
         )
 
-
 class AgentSession:
     """A single conversation session with its own short-term memory."""
 
