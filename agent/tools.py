@@ -155,7 +155,7 @@ class Tools:
             parts.append(f"招生说明：{prog.major_restrictions}")
         if prog.contact:
             parts.append(f"咨询电话：{prog.contact}")
-        parts.append(f"\n--- 培养方案详情 ---\n{prog.raw_text[:3000]}")
+        parts.append(f"\n--- 培养方案详情 ---\n{prog.raw_text[:18000]}")
         return "\n".join(parts)
 
     def check_requirements(self, major: str, program_name: str) -> str:
@@ -235,7 +235,7 @@ class Tools:
                 lines.append(f"  内容摘要：{course.description[:200]}")
         return "\n".join(lines)
 
-    def generate_schedule_tool(self, major: str = "", grade: str = "",
+    def generate_schedule(self, major: str = "", grade: str = "",
                                program_name: str = "",
                                completed_courses: str = "", gpa: str = "",
                                goals: str = "", target_semester: str = "") -> str:

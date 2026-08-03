@@ -38,7 +38,7 @@ class CoursePlanner:
             major=major,
             grade=grade,
             program_name=program_name,
-            program_text=prog.raw_text[:3000]
+            program_text=prog.raw_text[:12000]
         )
 
         augment = (
@@ -64,7 +64,7 @@ class CoursePlanner:
             llm_response = self._call_llm(messages)
 
             # ========== 创新2: Multi-Agent 审核 ==========
-            verification = self.multi_agent.verify_plan(llm_response, prog.raw_text[:2000])
+            verification = self.multi_agent.verify_plan(llm_response, prog.raw_text[:8000])
 
             # Build final output
             parts = [
