@@ -15,7 +15,7 @@ class ShortTermMemory:
     def __init__(self, max_turns: int = 20):
         self.messages: list[Message] = []
         self.max_turns = max_turns
-        self.max_message_characters = 6_000
+        self.max_message_characters = 20_000
 
     def add(self, role: str, content: str, tool_name: Optional[str] = None):
         if len(content) > self.max_message_characters:

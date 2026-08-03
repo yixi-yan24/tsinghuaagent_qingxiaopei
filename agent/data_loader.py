@@ -19,6 +19,11 @@ class TrainingProgram:
     raw_text: str = ""
 
 
+def _clean_md_line(s: str) -> str:
+    """Strip markdown heading markers (e.g. '## ') from a line."""
+    return re.sub(r"^#+\s*", "", s.strip())
+
+
 def parse_all() -> list[TrainingProgram]:
     """Parse the markdown training plan document into structured TrainingProgram objects.
 
@@ -39,7 +44,7 @@ def parse_all() -> list[TrainingProgram]:
     # Strategy: find each "一、培养目标" and look backwards for title + department
     prog_starts = []
     for i, line in enumerate(lines):
-        stripped = line.strip()
+        stripped = _clean_md_line(line)
         # Match program body start markers
         if re.match(r"一[、,]\s*培养目标", stripped):
             prog_starts.append(i)
@@ -51,7 +56,7 @@ def parse_all() -> list[TrainingProgram]:
         header_start = start_idx
 
         for j in range(start_idx - 1, max(start_idx - 30, 0), -1):
-            s = lines[j].strip()
+            s = _clean_md_line(lines[j])
             if not s:
                 continue
             # Skip page numbers and decorations
@@ -71,7 +76,7 @@ def parse_all() -> list[TrainingProgram]:
         if not title:
             # Fallback: use the line right before 一、培养目标
             for j in range(start_idx - 1, max(start_idx - 5, 0), -1):
-                s = lines[j].strip()
+                s = _clean_md_line(lines[j])
                 if s and len(s) > 3:
                     title = s
                     header_start = j
