@@ -1,3 +1,6 @@
 *.pyc
 .config
 .venv/
+memory/
+data/embeddings.pkl
+data/embeddings_meta.json
