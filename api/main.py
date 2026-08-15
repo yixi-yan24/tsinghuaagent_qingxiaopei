@@ -3,7 +3,7 @@ from collections import OrderedDict
 from threading import Lock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -25,6 +25,17 @@ def _get_api_key() -> str:
     return key
 
 API_KEY = _get_api_key()
+
+# Bearer 鉴权密钥：清小搭网关会用 Authorization: Bearer <credential> 调用。
+# 与 DeepSeek API_KEY 不同，这是本服务自己的访问凭证。
+SERVICE_API_KEY = os.environ.get("SERVICE_API_KEY", "sk-advisor-dev-key")
+
+def check_auth(authorization: Optional[str] = None):
+    """Validate the Bearer credential sent by the gateway. Invalid → 401."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing credential")
+    if authorization[len("Bearer "):] != SERVICE_API_KEY:
+        raise HTTPException(status_code=401, detail="invalid credential")
 
 _agent = TrainingPlanAgent(api_key=API_KEY)
 _programs = load_programs()
@@ -52,7 +63,7 @@ class ChatCompletionMessage(BaseModel):
     content: str = Field(min_length=1, max_length=12_000)
 
 class ChatCompletionRequest(BaseModel):
-    model: str = Field(default="tsinghua-training-plan-advisor", description="模型名，本服务固定为此值")
+    model: Optional[str] = Field(default=None, description="模型名，可选；网关可能传 null，忽略即可")
     messages: list[ChatCompletionMessage] = Field(min_length=1, max_length=50, description="对话消息列表")
     temperature: float = Field(default=0.3, ge=0, le=2)
     max_tokens: int = Field(default=4096, ge=1, le=8192)
@@ -122,7 +133,9 @@ def _convert_openai_to_agent(messages: list[ChatCompletionMessage]) -> str:
 
 
 @app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest):
+def chat_completions(request: ChatCompletionRequest,
+                     authorization: Optional[str] = Header(None)):
+    check_auth(authorization)
     user_content = _convert_openai_to_agent(request.messages)
 
     if not user_content:
@@ -143,16 +156,21 @@ def chat_completions(request: ChatCompletionRequest):
                 # relayed as they are produced (tool-call loops run internally).
                 chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
                 created = int(time.time())
+                resp_model = request.model or "tsinghua-training-plan-advisor"
 
                 def _stream_from_agent():
-                    yield _sse_chunk(chat_id, created, request.model,
-                                     {"role": "assistant", "content": ""}, None)
+                    # role 帧（首帧，恰好一次）
+                    yield _sse_chunk(chat_id, created, resp_model,
+                                     {"role": "assistant"}, None)
+                    # content 增量帧（0..N 次）
                     for token in session.process_message_stream(
                         user_content, temperature=request.temperature
                     ):
-                        yield _sse_chunk(chat_id, created, request.model,
+                        yield _sse_chunk(chat_id, created, resp_model,
                                          {"content": token}, None)
-                    yield _sse_chunk(chat_id, created, request.model, {}, "stop")
+                    # stop 帧（恰好一次），usage 合并在此帧
+                    yield _sse_chunk(chat_id, created, resp_model, {}, "stop",
+                                     usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
                     yield "data: [DONE]\n\n"
 
                 return StreamingResponse(
@@ -170,7 +188,7 @@ def chat_completions(request: ChatCompletionRequest):
     return ChatCompletionResponse(
         id=chat_id,
         created=created,
-        model=request.model,
+        model=request.model or "tsinghua-training-plan-advisor",
         choices=[
             Choice(
                 index=0,
@@ -183,7 +201,8 @@ def chat_completions(request: ChatCompletionRequest):
 
 
 def _sse_chunk(chat_id: str, created: int, model: str,
-               delta: dict, finish_reason: Optional[str]) -> str:
+               delta: dict, finish_reason: Optional[str],
+               usage: Optional[dict] = None) -> str:
     chunk = {
         "id": chat_id,
         "object": "chat.completion.chunk",
@@ -191,13 +210,16 @@ def _sse_chunk(chat_id: str, created: int, model: str,
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
     }
+    if usage:
+        chunk["usage"] = usage
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
 # === Helper endpoints ===
 
 @app.get("/v1/models")
-def list_models():
+def list_models(authorization: Optional[str] = Header(None)):
+    check_auth(authorization)
     return {
         "object": "list",
         "data": [
@@ -242,16 +264,17 @@ def list_programs():
 
 @app.get("/programs/{name}")
 def get_program(name: str):
-    for m in _programs:
-        if name in m.name or m.name in name:
-            return {
-                "name": m.name,
-                "department": m.department,
-                "total_credits": m.total_credits,
-                "degree": m.degree,
-                "duration": m.duration,
-                "prerequisites": m.prerequisites,
-                "major_restrictions": m.major_restrictions,
-                "contact": m.contact
-            }
-    raise HTTPException(status_code=404, detail=f"未找到培养方案: {name}")
+    from agent.data_loader import get_program_by_name
+    m = get_program_by_name(name, _programs)
+    if m is None:
+        raise HTTPException(status_code=404, detail=f"未找到培养方案: {name}")
+    return {
+        "name": m.name,
+        "department": m.department,
+        "total_credits": m.total_credits,
+        "degree": m.degree,
+        "duration": m.duration,
+        "prerequisites": m.prerequisites,
+        "major_restrictions": m.major_restrictions,
+        "contact": m.contact
+    }

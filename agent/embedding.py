@@ -1,4 +1,4 @@
-import os, json, pickle
+import os, json, pickle, threading
 import numpy as np
 from typing import Optional
 
@@ -10,15 +10,25 @@ EMBEDDING_CACHE_FILE = os.path.join(EMBEDDING_CACHE_DIR, "embeddings.pkl")
 EMBEDDING_META_FILE = os.path.join(EMBEDDING_CACHE_DIR, "embeddings_meta.json")
 
 _model = None
+_model_lock = threading.Lock()
 
 
 def _load_model():
+    """Load the sentence-transformer model exactly once (thread-safe).
+
+    Suppresses the tqdm "Loading weights: …" progress bar so it never pollutes
+    CLI output or API logs.  Use ``TQDM_DISABLE=0`` to force it back on.
+    """
     global _model
     if _model is not None:
         return _model
-    from sentence_transformers import SentenceTransformer
-    _model = SentenceTransformer(MODEL_NAME)
-    return _model
+    with _model_lock:
+        if _model is not None:
+            return _model
+        os.environ.setdefault("TQDM_DISABLE", "1")
+        from sentence_transformers import SentenceTransformer
+        _model = SentenceTransformer(MODEL_NAME)
+        return _model
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
