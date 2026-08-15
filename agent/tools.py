@@ -247,8 +247,8 @@ class Tools:
         if not major or not program_name:
             return "请提供专业和培养方案名称，以便生成课程表。"
         try:
-            gpa_val = float(gpa) if gpa and gpa.strip() else 0.0
-        except ValueError:
+            gpa_val = float(gpa) if gpa and str(gpa).strip() else 0.0
+        except (ValueError, TypeError):
             gpa_val = 0.0
         return generate_schedule(
             major=major, grade=grade, program_name=program_name,

@@ -202,6 +202,7 @@ class CourseScheduler:
             graph_courses,
             start_semester_offset=start_semester + grade_num * 3,
             total_semesters=total_semesters,
+            max_credits_per_semester=self.constraints.max_credits_per_semester,
         )
 
         # 5) Apply credit limits and rebalance
@@ -450,12 +451,38 @@ class CourseScheduler:
                                   ) -> tuple[str, float, str]:
         """Extract course name, credits, and semester from raw_text.
 
-        In the PDF text, courses appear as multi-line records:
+        The raw markdown embeds HTML tables whose rows look like
+        ``<td>10421263</td><td>微积分C(1)</td><td>3</td>...`` — parse those
+        first.  Falls back to the plain-text multi-line PDF layout:
             [course ID line]    10421263
             [course name line]  微积分C(1)
             [credits line]      3
-            [semester+ lines]   秋 / 必修 / ...
         """
+        # 1) HTML table row: <td>ID</td><td>NAME</td><td>CREDITS</td>
+        m = re.search(
+            r"<td[^>]*>\s*" + re.escape(cid) + r"\s*</td>\s*"
+            r"<td[^>]*>([^<]*)</td>\s*"
+            r"<td[^>]*>([^<]*)</td>",
+            raw_text, re.DOTALL,
+        )
+        if m:
+            name = m.group(1).strip()
+            credits = 0.0
+            try:
+                credits = float(m.group(2).strip())
+            except ValueError:
+                pass
+            # Look for an offering-semester column right after credits.
+            semester = ""
+            rest = raw_text[m.end():]
+            nxt = re.match(r"\s*<td[^>]*>([^<]*)</td>", rest)
+            if nxt:
+                cell = nxt.group(1).strip()
+                if any(kw in cell for kw in ("秋", "春", "夏")):
+                    semester = cell
+            return (name or cid, credits, semester)
+
+        # 2) Plain-text fallback (PDF-converted layout)
         idx = raw_text.find(cid)
         if idx < 0:
             return (cid, 0, "")
@@ -498,7 +525,8 @@ class CourseScheduler:
 
     def _constrained_topological_sort(self, courses: list[GraphCourse],
                                       start_semester_offset: int = 0,
-                                      total_semesters: int = 8
+                                      total_semesters: int = 8,
+                                      max_credits_per_semester: int = 25
                                       ) -> list[list[GraphCourse]]:
         """Topological sort with semester constraints and credit awareness.
 
@@ -538,6 +566,7 @@ class CourseScheduler:
                     queue.append(n)
 
             semester_courses: list[GraphCourse] = []
+            semester_credits = 0.0
             deferred: deque[str] = deque()
 
             while queue:
@@ -550,7 +579,14 @@ class CourseScheduler:
                     deferred.append(name)
                     continue
 
+                # Credit cap: defer over-budget courses to the next term,
+                # unless nothing has been scheduled yet this term (soft cap).
+                if semester_courses and semester_credits + course.credits > max_credits_per_semester:
+                    deferred.append(name)
+                    continue
+
                 semester_courses.append(course)
+                semester_credits += course.credits
                 taken.add(name)
 
                 # Reduce in-degree of dependents
@@ -559,6 +595,20 @@ class CourseScheduler:
                         in_degree[other_name] -= 1
                         if in_degree[other_name] == 0 and other_name not in taken:
                             queue.append(other_name)
+
+            # Deadlock guard: if the credit cap deferred everything this term,
+            # force one course in — the cap must not stall the whole plan.
+            if not semester_courses and deferred:
+                name = deferred.popleft()
+                course = course_map.get(name)
+                if course:
+                    semester_courses.append(course)
+                    taken.add(name)
+                    for other_name, prereqs in adj.items():
+                        if name in prereqs and other_name in in_degree:
+                            in_degree[other_name] -= 1
+                            if in_degree[other_name] == 0 and other_name not in taken:
+                                queue.append(other_name)
 
             # Push deferred back
             while deferred:
@@ -798,6 +848,13 @@ def generate_schedule(
     program = get_program_by_name(program_name, programs)
     if not program:
         return f"未找到培养方案: {program_name}"
+
+    # 消歧：很多书院制方案都叫"本科培养方案"，当 program_name 匹配到的方案
+    # 与学生的专业（院系）无关时，用 major 重新定位（如 major=笃实书院）。
+    if major and major not in program.department and program.department not in major:
+        alt = get_program_by_name(major, programs)
+        if alt and alt is not program:
+            program = alt
 
     # Parse completed courses
     completed = [c.strip() for c in completed_courses.replace("，", ",").split(",") if c.strip()]

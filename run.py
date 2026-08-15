@@ -19,6 +19,17 @@ def _get_api_key() -> str:
 API_KEY = _get_api_key()
 
 
+def _warmup_embedding():
+    """Preload the semantic-search model in the background so the first
+    conversation turn does not stall for ~15s inside a tool call."""
+    try:
+        from agent.embedding import _load_model
+        _load_model()
+        print("\n[i] 语义搜索模型已就绪。")
+    except Exception:
+        pass  # 加载失败不影响主流程，首次使用时再试
+
+
 def run_cli():
     """Run the agent in interactive CLI mode."""
     from agent.core import TrainingPlanAgent
@@ -33,6 +44,10 @@ def run_cli():
     print()
     print("你好！我是你的培养方案助手。请问你的专业是什么？有什么课程规划方面的需求吗？")
     print()
+
+    # 后台预加载词嵌入模型，避免首次语义搜索时长时间卡顿（静默加载）
+    import threading
+    threading.Thread(target=_warmup_embedding, daemon=True).start()
 
     while True:
         try:

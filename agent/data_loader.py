@@ -171,30 +171,43 @@ def get_program_by_name(name: str, programs: list[TrainingProgram]) -> Optional[
     """Find a training program by name or department, with graded fallback.
 
     Resolution order:
-      1. name exact/substring match
-      2. department exact/substring match
-      3. keyword-in-name match
-      4. keyword-in-department match
+      0. exact department match first — 书院制方案的名称多为通用名
+         (如"本科培养方案")，输入"笃实书院"时必须优先命中其院系
+      1. name exact match
+      2. name substring match
+      3. department substring match
+      4. keyword-in-name / keyword-in-department match
       5. semantic search (embedding) — lazy-loaded, only if needed
     """
     name = name.strip()
     if not name:
         return None
 
-    # 1 — name match
+    # 0 — exact department match (书院制方案名是通用名，院系是更可靠的锚点)
+    for m in programs:
+        if m.department == name:
+            return m
+
+    # 1 — exact name match
+    for m in programs:
+        if m.name == name:
+            return m
+
+    # 2 — name substring
     for m in programs:
         if name in m.name or m.name in name:
             return m
-    # 2 — department match
+
+    # 3 — department substring
     for m in programs:
         if name in m.department or m.department in name:
             return m
-    # 3 — keyword in name
+
+    # 4 — keyword in name / department
     for m in programs:
         for kw in name.split():
             if kw in m.name:
                 return m
-    # 4 — keyword in department
     for m in programs:
         for kw in name.split():
             if kw in m.department:

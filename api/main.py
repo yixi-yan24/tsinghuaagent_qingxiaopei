@@ -264,16 +264,17 @@ def list_programs():
 
 @app.get("/programs/{name}")
 def get_program(name: str):
-    for m in _programs:
-        if name in m.name or m.name in name:
-            return {
-                "name": m.name,
-                "department": m.department,
-                "total_credits": m.total_credits,
-                "degree": m.degree,
-                "duration": m.duration,
-                "prerequisites": m.prerequisites,
-                "major_restrictions": m.major_restrictions,
-                "contact": m.contact
-            }
-    raise HTTPException(status_code=404, detail=f"未找到培养方案: {name}")
+    from agent.data_loader import get_program_by_name
+    m = get_program_by_name(name, _programs)
+    if m is None:
+        raise HTTPException(status_code=404, detail=f"未找到培养方案: {name}")
+    return {
+        "name": m.name,
+        "department": m.department,
+        "total_credits": m.total_credits,
+        "degree": m.degree,
+        "duration": m.duration,
+        "prerequisites": m.prerequisites,
+        "major_restrictions": m.major_restrictions,
+        "contact": m.contact
+    }

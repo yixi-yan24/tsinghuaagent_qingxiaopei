@@ -24,17 +24,54 @@ def parse_courses_from_table(markdown_text: str) -> list[Course]:
     return _parse_text_courses(markdown_text)
 
 
+# 表头别名 → 列语义。注意顺序：先匹配更具体的（如"备注(说明及先修要求)"）。
+_HEADER_ALIASES = [
+    ("课程编号", "id"), ("课程代码", "id"), ("编号", "id"), ("课程号", "id"),
+    ("课程名称", "name"), ("名称", "name"), ("课程", "name"),
+    ("学分", "credits"),
+    ("开课学期", "semester"), ("学期", "semester"), ("开课", "semester"),
+    ("备注(说明及先修要求)", "prereqs"), ("备注", "prereqs"),
+    ("先修要求", "prereqs"), ("先修", "prereqs"), ("说明", "prereqs"),
+]
+
+
+def _detect_column_map(cells: list[str]) -> dict[int, str]:
+    """Map column index → semantic key based on a header row.
+
+    Returns e.g. {0: 'id', 1: 'name', 2: 'credits', 3: 'prereqs'}.
+    """
+    col_map: dict[int, str] = {}
+    for idx, cell in enumerate(cells):
+        for alias, semantic in _HEADER_ALIASES:
+            if alias in cell:
+                col_map[idx] = semantic
+                break
+    return col_map
+
+
 def _parse_html_tables(text: str) -> list[Course]:
-    """Parse embedded HTML table rows from a Markdown document."""
+    """Parse embedded HTML table rows from a Markdown document.
+
+    Column meanings are taken from the header row when present (so a
+    ``备注(说明及先修要求)`` column becomes *raw_prereqs* instead of being
+    mistaken for an offering-semester column).  Falls back to the fixed
+    [id, name, credits, semester, prereqs] layout when no header is found.
+    """
     courses = []
     rows = re.findall(r"<tr>(.*?)</tr>", text, re.DOTALL)
     if not rows:
         return courses
     current_type = ""
+    col_map: dict[int, str] | None = None
 
     for row in rows:
         cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)
         cells = [re.sub(r"<[^>]+>", "", c).strip() for c in cells]
+
+        # Header row — detect column semantics.
+        if cells and any("课程编号" in c or "课程代码" in c or c == "编号" for c in cells):
+            col_map = _detect_column_map(cells)
+            continue
 
         # Detect section headers like <td colspan="5">必修课程 28 学分</td>
         if len(cells) == 1:
@@ -47,23 +84,34 @@ def _parse_html_tables(text: str) -> list[Course]:
                 current_type = "选修"
             continue
 
-        if len(cells) >= 4:
+        if len(cells) >= 4 or (col_map and len(cells) >= 3):
             course_id = cells[0]
             # Skip non-course rows (headers, merged cells)
             if not re.match(r"^\d", course_id) and course_id not in {"新开课", "新开"}:
                 continue
 
-            name = cells[1] if len(cells) > 1 else ""
+            if col_map:
+                def _cell(semantic: str) -> str:
+                    for idx, sem in col_map.items():
+                        if sem == semantic and idx < len(cells):
+                            return cells[idx]
+                    return ""
+
+                name = _cell("name") or (cells[1] if len(cells) > 1 else "")
+                credits_raw = _cell("credits") or (cells[2] if len(cells) > 2 else "")
+                semester = _cell("semester")
+                raw_prereqs = _cell("prereqs")
+            else:
+                name = cells[1] if len(cells) > 1 else ""
+                credits_raw = cells[2] if len(cells) > 2 else ""
+                semester = cells[3] if len(cells) > 3 else ""
+                raw_prereqs = cells[4] if len(cells) > 4 else ""
 
             credits = 0
             try:
-                credits = float(cells[2]) if len(cells) > 2 else 0
+                credits = float(credits_raw) if credits_raw else 0
             except ValueError:
                 pass
-
-            semester = cells[3] if len(cells) > 3 else ""
-
-            raw_prereqs = cells[4] if len(cells) > 4 else ""
 
             if course_id or name:
                 courses.append(Course(
@@ -227,12 +275,14 @@ def _course_offered_in_semester(course: Course, target_sem: str) -> bool:
     return True  # unrecognised → assume no constraint
 
 
-def topological_sort(courses: list[Course]) -> list[list[Course]]:
+def topological_sort(courses: list[Course],
+                     max_credits_per_semester: int = 25) -> list[list[Course]]:
     """Generate a semester-by-semester plan using topological sort.
 
     Returns a list of semesters, each a list of courses to take that term.
-    Courses are ordered so that prerequisites come before dependents, and
-    each course is only placed in a semester where it is actually offered.
+    Courses are ordered so that prerequisites come before dependents, each
+    course is only placed in a semester where it is actually offered, and a
+    per-semester credit cap keeps the load balanced across terms.
 
     When a genuine cycle or deadlock is detected the affected courses are
     placed into a final "未排入" (unscheduled) semester with an explanation
@@ -272,6 +322,7 @@ def topological_sort(courses: list[Course]) -> list[list[Course]]:
                 queue.append(n)
 
         semester_courses: list[Course] = []
+        semester_credits = 0.0
         deferred: deque[str] = deque()
 
         while queue:
@@ -284,7 +335,14 @@ def topological_sort(courses: list[Course]) -> list[list[Course]]:
                 deferred.append(name)
                 continue
 
+            # Credit cap: defer over-budget courses to the next term, unless
+            # nothing has been scheduled yet this term (cap is a soft limit).
+            if semester_courses and semester_credits + course.credits > max_credits_per_semester:
+                deferred.append(name)
+                continue
+
             semester_courses.append(course)
+            semester_credits += course.credits
             taken.add(name)
             remaining.discard(name)
 
@@ -294,6 +352,21 @@ def topological_sort(courses: list[Course]) -> list[list[Course]]:
                     in_degree[other_name] -= 1
                     if in_degree[other_name] == 0 and other_name not in taken:
                         queue.append(other_name)
+
+        # Deadlock guard: if the credit cap deferred everything this term,
+        # force one course in — the cap must not stall the whole plan.
+        if not semester_courses and deferred:
+            name = deferred.popleft()
+            course = course_map.get(name)
+            if course:
+                semester_courses.append(course)
+                taken.add(name)
+                remaining.discard(name)
+                for other_name, prereqs in adj.items():
+                    if name in prereqs and other_name in in_degree:
+                        in_degree[other_name] -= 1
+                        if in_degree[other_name] == 0 and other_name not in taken:
+                            queue.append(other_name)
 
         # Push deferred courses back so they are reconsidered next term.
         while deferred:
