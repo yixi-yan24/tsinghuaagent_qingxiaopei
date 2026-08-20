@@ -2,9 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 安装依赖（利用 Docker 层缓存）
+# 安装依赖（清华源主索引 + PyTorch CPU 附加索引）
 COPY requirements.txt .
-RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+RUN pip install --no-cache-dir torch==2.13.0+cpu \
+    --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    --timeout 120 \
+    && pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
 
 # 创建非 root 用户

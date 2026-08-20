@@ -1,4 +1,4 @@
-import os, sys, time, uuid, json, logging
+import os, sys, time, uuid, json, logging, threading
 from collections import OrderedDict
 from threading import Lock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -40,6 +40,17 @@ def check_auth(authorization: Optional[str] = None):
 _agent = TrainingPlanAgent(api_key=API_KEY)
 _programs = load_programs()
 logger = logging.getLogger(__name__)
+
+# 后台预热词向量模型与索引：不阻塞服务启动，且失败不致命。
+def _warmup_embeddings():
+    try:
+        from agent.embedding import warmup
+        warmup(_programs)
+        logger.info("词向量模型预热完成")
+    except Exception:
+        logger.warning("词向量预热失败（不影响对话服务，首次语义搜索会稍慢）", exc_info=True)
+
+threading.Thread(target=_warmup_embeddings, daemon=True, name="embedding-warmup").start()
 
 app = FastAPI(
     title="Tsinghua Training Plan Advisor API (OpenAI-compatible)",
