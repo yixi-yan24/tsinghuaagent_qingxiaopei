@@ -123,10 +123,12 @@ TsingXiaoPeiAgent/
 
 | 组件 | 说明 |
 |------|------|
-| **推理机制** | ReAct 模式：LLM 输出 `ACTION` 触发工具调用，结果回填后二次推理 |
-| **短期记忆** | 每个会话独立的对话历史（最近 20 轮），以 `user` 字段区分 |
+| **推理机制** | 原生 Function Calling（结构化 `tool_calls`），兼容文本 `THOUGHT/ACTION/PARAMS` 兜底 |
+| **思考链展示** | 基于 DeepSeek Thinking Mode，流式输出 `reasoning_content`（中文思考），复杂问题按需开启 |
+| **工具过程可视化** | 流式输出工具执行状态（"正在调用工具 xxx…"），CLI 与 API SSE 均支持 |
+| **短期记忆** | 每个会话独立的对话历史（最近 20 轮），以 `user` 字段区分，自动修复工具调用配对 |
 | **长期记忆** | 本科专业培养方案结构化数据 + 1000+ 门已整理的课程资料 |
-| **词嵌入** | 基于 `shibing624/text2vec-base-chinese` 的语义搜索，余弦相似度排序 |
+| **词嵌入** | 基于 `shibing624/text2vec-base-chinese` 的语义搜索，余弦相似度排序，与关键词双通道互补 |
 | **规划能力** | LLM 自主推理 + 拓扑排序双通道，考虑先修关系、开课学期、学分均衡 |
 | **排课引擎** | 约束优化自动排课：支持先修关系 DAG、开课学期、学分上限（25/学期）、时间冲突检测、保研约束、已修课程排除 |
 | **工具集** | list_programs / search_programs / semantic_search / get_program_detail / check_requirements / multi_agent_search / search_courses / get_course_detail / list_program_courses / recommend_courses / generate_schedule |

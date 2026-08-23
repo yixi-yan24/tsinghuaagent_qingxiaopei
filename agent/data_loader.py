@@ -171,13 +171,14 @@ def get_program_by_name(name: str, programs: list[TrainingProgram]) -> Optional[
     """Find a training program by name or department, with graded fallback.
 
     Resolution order:
-      0. exact department match first — 书院制方案的名称多为通用名
-         (如"本科培养方案")，输入"笃实书院"时必须优先命中其院系
-      1. name exact match
-      2. name substring match
-      3. department substring match
-      4. keyword-in-name / keyword-in-department match
-      5. semantic search (embedding) — lazy-loaded, only if needed
+      0. exact department match — 书院制方案的名称多为通用名(如"本科培养方案")
+      1. exact name match
+      2. department name appears inside the query — 输入"本科培养方案（笃实书院）"
+         时，"笃实书院"完整出现在输入里，是强信号，必须优先于泛化的名称子串匹配
+      3. name substring match
+      4. query appears inside department（输入是院系子串，如"笃实"）
+      5. keyword-in-name / keyword-in-department match
+      6. semantic search (embedding) — lazy-loaded, only if needed
     """
     name = name.strip()
     if not name:
@@ -193,17 +194,22 @@ def get_program_by_name(name: str, programs: list[TrainingProgram]) -> Optional[
         if m.name == name:
             return m
 
-    # 2 — name substring
+    # 2 — 院系名完整出现在输入里（如"本科培养方案（笃实书院）"→ 笃实书院）
+    for m in programs:
+        if m.department and m.department in name:
+            return m
+
+    # 3 — name substring
     for m in programs:
         if name in m.name or m.name in name:
             return m
 
-    # 3 — department substring
+    # 4 — 输入是院系子串（如"笃实"）
     for m in programs:
-        if name in m.department or m.department in name:
+        if m.department and name in m.department:
             return m
 
-    # 4 — keyword in name / department
+    # 5 — keyword in name / department
     for m in programs:
         for kw in name.split():
             if kw in m.name:
@@ -213,7 +219,7 @@ def get_program_by_name(name: str, programs: list[TrainingProgram]) -> Optional[
             if kw in m.department:
                 return m
 
-    # 5 — semantic search (lazy, so no impact on startup)
+    # 6 — semantic search (lazy, so no impact on startup)
     try:
         from .embedding import semantic_search as _semantic_search
         results = _semantic_search(name, programs, top_k=1)

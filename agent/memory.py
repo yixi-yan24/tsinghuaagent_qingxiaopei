@@ -9,6 +9,7 @@ class Message:
     tool_name: Optional[str] = None
     tool_call_id: Optional[str] = None   # 原生 function calling 的 tool_call id
     tool_calls: Optional[list] = None    # assistant 消息携带的原生 tool_calls
+    reasoning_content: str = ""          # thinking mode 下 assistant 的思考内容
 
 
 class ShortTermMemory:
@@ -21,12 +22,14 @@ class ShortTermMemory:
 
     def add(self, role: str, content: str, tool_name: Optional[str] = None,
             tool_call_id: Optional[str] = None,
-            tool_calls: Optional[list] = None):
+            tool_calls: Optional[list] = None,
+            reasoning_content: str = ""):
         if len(content) > self.max_message_characters:
             content = content[:self.max_message_characters] + "\n[内容已截断]"
         self.messages.append(Message(
             role=role, content=content, tool_name=tool_name,
             tool_call_id=tool_call_id, tool_calls=tool_calls,
+            reasoning_content=reasoning_content,
         ))
         if len(self.messages) > self.max_turns * 2:
             # Keep system prompt + recent history.
@@ -76,11 +79,15 @@ class ShortTermMemory:
                 responded = {t.tool_call_id for t in tool_msgs}
                 complete = bool(ids) and ids.issubset(responded) and len(tool_msgs) == len(ids)
                 if complete:
-                    result.append({
+                    entry = {
                         "role": "assistant",
                         "content": msg.content or None,
                         "tool_calls": msg.tool_calls,
-                    })
+                    }
+                    if msg.reasoning_content:
+                        # Thinking mode 要求把 assistant 的思考回传，否则多轮 400。
+                        entry["reasoning_content"] = msg.reasoning_content
+                    result.append(entry)
                     for t in tool_msgs:
                         result.append({
                             "role": "tool",
@@ -107,7 +114,10 @@ class ShortTermMemory:
                 })
                 i += 1
             else:
-                result.append({"role": msg.role, "content": msg.content})
+                entry = {"role": msg.role, "content": msg.content}
+                if msg.role == "assistant" and msg.reasoning_content:
+                    entry["reasoning_content"] = msg.reasoning_content
+                result.append(entry)
                 i += 1
         return result
 

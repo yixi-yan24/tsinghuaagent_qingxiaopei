@@ -1,4 +1,4 @@
-import os, sys, time, uuid, json, logging, threading
+import os, sys, time, uuid, json, logging, asyncio, threading
 from collections import OrderedDict
 from threading import Lock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -104,17 +104,17 @@ class ChatCompletionResponse(BaseModel):
 
 MAX_SESSIONS = 1_000
 _sessions: OrderedDict[str, AgentSession] = OrderedDict()
-_session_locks: dict[str, Lock] = {}
+_session_locks: dict[str, asyncio.Lock] = {}
 _sessions_lock = Lock()
 
-def _get_or_create_session(user_id: Optional[str] = None) -> tuple[str, AgentSession, Lock]:
+def _get_or_create_session(user_id: Optional[str] = None) -> tuple[str, AgentSession, asyncio.Lock]:
     if user_id and user_id in _sessions:
         _sessions.move_to_end(user_id)
         return user_id, _sessions[user_id], _session_locks[user_id]
     sid = user_id or str(uuid.uuid4())
     session = _agent.create_session()
     _sessions[sid] = session
-    session_lock = Lock()
+    session_lock = asyncio.Lock()
     _session_locks[sid] = session_lock
     if len(_sessions) > MAX_SESSIONS:
         expired_sid, _ = _sessions.popitem(last=False)
@@ -144,8 +144,8 @@ def _convert_openai_to_agent(messages: list[ChatCompletionMessage]) -> str:
 
 
 @app.post("/v1/chat/completions")
-def chat_completions(request: ChatCompletionRequest,
-                     authorization: Optional[str] = Header(None)):
+async def chat_completions(request: ChatCompletionRequest,
+                           authorization: Optional[str] = Header(None)):
     check_auth(authorization)
     user_content = _convert_openai_to_agent(request.messages)
 
@@ -155,7 +155,7 @@ def chat_completions(request: ChatCompletionRequest,
     try:
         with _sessions_lock:
             sid, session, session_lock = _get_or_create_session(request.user)
-        with session_lock:
+        async with session_lock:
             # Seed STM with prior conversation when the session is fresh.
             if len(session.stm.messages) <= 1 and len(request.messages) > 1:
                 for msg in request.messages[:-1]:
@@ -163,22 +163,30 @@ def chat_completions(request: ChatCompletionRequest,
                         session.stm.add(msg.role, msg.content)
 
             if request.stream:
-                # True SSE streaming — tokens from the final LLM turn are
-                # relayed as they are produced (tool-call loops run internally).
+                # True SSE streaming — events relayed as they are produced.
                 chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
                 created = int(time.time())
                 resp_model = request.model or "tsinghua-training-plan-advisor"
 
-                def _stream_from_agent():
+                async def _stream_from_agent():
                     # role 帧（首帧，恰好一次）
                     yield _sse_chunk(chat_id, created, resp_model,
                                      {"role": "assistant"}, None)
-                    # content 增量帧（0..N 次）
-                    for token in session.process_message_stream(
+                    # 事件帧：reasoning（思考）→ content（回答）→ tool（工具状态）
+                    async for ev in session.process_message_events(
                         user_content, temperature=request.temperature
                     ):
-                        yield _sse_chunk(chat_id, created, resp_model,
-                                         {"content": token}, None)
+                        if ev["type"] == "reasoning":
+                            # DeepSeek/OpenAI 兼容的思考链字段，前端可单独展示
+                            yield _sse_chunk(chat_id, created, resp_model,
+                                             {"reasoning_content": ev["text"]}, None)
+                        elif ev["type"] == "content":
+                            yield _sse_chunk(chat_id, created, resp_model,
+                                             {"content": ev["text"]}, None)
+                        elif ev["type"] == "tool":
+                            # 工具执行状态：以带标记的文本呈现，前端可直接展示
+                            yield _sse_chunk(chat_id, created, resp_model,
+                                             {"content": f"\n🔍 正在调用工具 {ev['name']}…\n"}, None)
                     # stop 帧（恰好一次），usage 合并在此帧
                     yield _sse_chunk(chat_id, created, resp_model, {}, "stop",
                                      usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
@@ -188,7 +196,7 @@ def chat_completions(request: ChatCompletionRequest,
                     _stream_from_agent(), media_type="text/event-stream"
                 )
 
-            reply = session.process_message(user_content, temperature=request.temperature)
+            reply = await session.process_message(user_content, temperature=request.temperature)
     except Exception:
         logger.exception("Chat completion failed")
         raise HTTPException(status_code=502, detail="上游模型服务暂时不可用，请稍后重试")

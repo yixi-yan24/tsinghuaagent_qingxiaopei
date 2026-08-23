@@ -31,7 +31,12 @@ def _warmup_embedding():
 
 
 def run_cli():
-    """Run the agent in interactive CLI mode."""
+    """Run the agent in interactive CLI mode (async flow via asyncio.run)."""
+    import asyncio
+    asyncio.run(_run_cli_async())
+
+
+async def _run_cli_async():
     from agent.core import TrainingPlanAgent
 
     agent = TrainingPlanAgent(api_key=API_KEY)
@@ -83,10 +88,39 @@ def run_cli():
             continue
 
         print("\n助手 > ", end="", flush=True)
-        for token in session.process_message_stream(user_input):
-            print(token, end="", flush=True)
+        await _stream_reply(session, user_input)
         print()
         print()
+
+
+async def _stream_reply(session, user_input: str):
+    """Consume the structured event stream and pretty-print it:
+    reasoning in gray, tool status in yellow, final answer in default color."""
+    import os
+    if os.name == "nt":
+        os.system("")  # 启用 Windows 终端 ANSI 转义序列
+    GRAY, YELLOW, RESET = "\033[90m", "\033[33m", "\033[0m"
+
+    in_thinking = False
+    async for ev in session.process_message_events(user_input):
+        if ev["type"] == "reasoning":
+            if not in_thinking:
+                print(f"{GRAY}💭 思考：{RESET}", end="", flush=True)
+                in_thinking = True
+            print(f"{GRAY}{ev['text']}{RESET}", end="", flush=True)
+        elif ev["type"] == "tool":
+            if in_thinking:
+                print(RESET, end="", flush=True)
+                in_thinking = False
+            print(f"{YELLOW}\n🔍 正在调用工具 {ev['name']}…{RESET}", end="", flush=True)
+        elif ev["type"] == "content":
+            if in_thinking:
+                print(RESET, end="", flush=True)
+                in_thinking = False
+                print("\n\n助手 > ", end="", flush=True)
+            print(ev["text"], end="", flush=True)
+    if in_thinking:
+        print(RESET, end="", flush=True)
 
 
 def run_api(host: str = "0.0.0.0", port: int = 8000):
