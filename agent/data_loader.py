@@ -147,13 +147,30 @@ def _extract_metadata(prog: TrainingProgram):
         prog.contact = m.group(1).strip()
 
 
+def _disambiguate_program_names(programs: list[TrainingProgram]) -> list[TrainingProgram]:
+    """Disambiguate duplicated program names.
+
+    书院制方案的名称多为通用名"本科培养方案"（数据里出现 11 次），导致
+    get_program_detail("本科培养方案") 必然命中第一个同名方案（往往是美术
+    学院）。把重名方案重命名为 "{院系}本科培养方案"（如"笃实书院本科培养方案"），
+    列表显示与工具传参都变成唯一名称，从根上消除错配。
+    """
+    counts: dict[str, int] = {}
+    for p in programs:
+        counts[p.name] = counts.get(p.name, 0) + 1
+    for p in programs:
+        if counts.get(p.name, 0) > 1 and p.department:
+            p.name = f"{p.department}{p.name}"
+    return programs
+
+
 def load_programs(force_reload: bool = False) -> list[TrainingProgram]:
     """Load programs from cache or parse from scratch."""
     if not force_reload and os.path.exists(CACHE_PATH):
         try:
             with open(CACHE_PATH, encoding="utf-8") as f:
                 data = json.load(f)
-            return [TrainingProgram(**item) for item in data]
+            return _disambiguate_program_names([TrainingProgram(**item) for item in data])
         except Exception:
             pass
 
@@ -164,7 +181,7 @@ def load_programs(force_reload: bool = False) -> list[TrainingProgram]:
             json.dump([asdict(m) for m in programs], f, ensure_ascii=False, indent=2)
     except PermissionError:
         pass
-    return programs
+    return _disambiguate_program_names(programs)
 
 
 def get_program_by_name(name: str, programs: list[TrainingProgram]) -> Optional[TrainingProgram]:

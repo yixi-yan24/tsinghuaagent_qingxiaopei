@@ -26,10 +26,17 @@ _SCAFFOLD_BARE = ("无", "none", "None", "不需要", "不需要工具", "无工
 _ACTION_RE = re.compile(r"ACTION\s*[：:]\s*(\S+)", re.IGNORECASE)
 _PARAMS_RE = re.compile(r"PARAMS\s*[：:]\s*", re.IGNORECASE)
 
-# Claude 风格 XML 工具调用标签：模型偶尔在正文里模仿 <tool_calls>/<invoke> 等
-# 格式而不是用真正的 API tool_calls，这些标签必须从用户可见输出中隐藏。
+# Claude/DeepSeek 风格的工具调用标记：模型偶尔在正文里模仿工具调用格式，
+# 这些标记必须从用户可见输出中隐藏。实测会出现的畸形变体包括：
+#   <tool_calls>           标准半角
+#   ＜tool_calls＞         全角尖括号（U+FF1C/U+FF1E）
+#   <｜tool_calls｜>       全角竖线（U+FF5C）充当分隔符
+#   <｜DSML｜tool_calls｜> 带 DSML(DeepSeek Markup Language) 前缀
+# 因此匹配时：尖括号后跳过任意非字母噪声字符 + 可选 DSML 前缀，再匹配标签名。
 _TOOL_XML_RE = re.compile(
-    r"^\s*</?(tool_calls|invoke|parameter|function|tool_call|antml:invoke|antml:parameter)\b",
+    r"^\s*[<＜]/?[^\w]*(?:DSML[^\w]*)?"
+    r"(tool_calls|invoke|parameter|function|tool_call|"
+    r"antml:invoke|antml:parameter|antml:function)\b",
     re.IGNORECASE,
 )
 
@@ -42,7 +49,8 @@ _PSEUDO_THOUGHT_RE = re.compile(
     r"接下来我可以|我再|我现在需要|我还需要|用户是|我应该|那么我应该|"
     r"接下来应该|我认为|不过我需要|不过让我|同时我可以|同时，我可以|"
     r"首先，让我|首先搜索|首先需要|先让我|我可以先|让我再|首先我|"
-    r"由于用户|根据用户|用户没有|由于|那么我|这轮|本轮|这次|这个用户).{0,120}$"
+    r"由于用户|根据用户|用户没有|由于|那么我|这轮|本轮|这次|这个用户|"
+    r"我找到了|我找到|我查到|我已找到|我搜到).{0,120}$"
 )
 
 
@@ -164,13 +172,18 @@ class AgentSession:
     # flow usually needs 2–4; beyond that the loop is not converging).
     MAX_TOOL_HOPS = 5
 
-    # 复杂意图关键词：这类问题值得开启思考链（排课/规划/推荐/分析等）。
-    _COMPLEX_INTENT_KEYWORDS = (
+    # 明确意图关键词：命中即开启思考链。注意"我对人工智能感兴趣"这类表达
+    # 也要命中，因此包含"感兴趣/兴趣/想学/帮我"等。
+    _INTENT_KEYWORDS = (
         "排课", "规划", "计划", "推荐", "分析", "建议", "比较", "对比",
         "为什么", "如何", "怎么", "方案", "安排", "策略", "课程表",
         "修读", "选课", "培养", "适合", "合适", "转专业", "保研", "深造",
-        "研究", "从事", "方向", "发展",
+        "研究", "从事", "方向", "发展", "感兴趣", "兴趣", "想学", "想了解",
+        "想研究", "希望", "帮我", "想", "了解",
     )
+
+    # 简单寒暄：命中则不开启思考（直接快速回答）。
+    _GREETING_KEYWORDS = ("你好", "嗨", "hi", "hello", "谢谢", "再见", "嗯", "在吗", "好的", "哈哈")
 
     # ── tool dispatch table (built once per class) ──────────────────────
     _TOOL_PARAM_MAP: dict[str, list[str]] = {
@@ -212,8 +225,22 @@ class AgentSession:
 
     @staticmethod
     def _should_think(user_message: str) -> bool:
-        """True if the question is complex enough to warrant a thinking chain."""
-        return any(kw in user_message for kw in AgentSession._COMPLEX_INTENT_KEYWORDS)
+        """True if the question warrants a thinking chain.
+
+        默认对多数问题开启思考（能看到推理链、回答更扎实）；只有明显简单
+        的寒暄/短句关闭，以保证响应速度。
+        """
+        msg = user_message.strip()
+        if not msg:
+            return False
+        # 简短寒暄 → 不思考
+        if len(msg) <= 6 and any(kw in msg for kw in AgentSession._GREETING_KEYWORDS):
+            return False
+        # 含明确意图 → 思考
+        if any(kw in msg for kw in AgentSession._INTENT_KEYWORDS):
+            return True
+        # 较长消息（>= 8 字符）默认视为有内容的问题 → 思考
+        return len(msg) >= 8
 
     async def process_message(self, user_message: str, temperature: float = 0.3) -> str:
         """Async: process a user message and return the agent response."""
@@ -240,19 +267,31 @@ class AgentSession:
         full_content: list[str] = []
         full_reasoning: list[str] = []      # 仅最终轮的思考（中间轮已各自保存）
         current_reasoning: list[str] = []
-        async for ev in self._call_llm_stream(
-            temperature=temperature, enable_thinking=should_think
-        ):
-            if ev["type"] == "content":
-                if current_reasoning:
-                    full_reasoning = current_reasoning
-                    current_reasoning = []
-                full_content.append(ev["text"])
-            elif ev["type"] == "reasoning":
-                current_reasoning.append(ev["text"])
-            elif ev["type"] == "tool":
-                current_reasoning = []       # 新一轮工具调用，思考重新累积
-            yield ev
+        try:
+            async for ev in self._call_llm_stream(
+                temperature=temperature, enable_thinking=should_think
+            ):
+                if ev["type"] == "content":
+                    if current_reasoning:
+                        full_reasoning = current_reasoning
+                        current_reasoning = []
+                    full_content.append(ev["text"])
+                elif ev["type"] == "reasoning":
+                    current_reasoning.append(ev["text"])
+                elif ev["type"] == "tool":
+                    current_reasoning = []       # 新一轮工具调用，思考重新累积
+                yield ev
+        except Exception:
+            # 最后兜底：任何内部异常都不允许"静默断流"，给出可用的回答。
+            if not full_content:
+                try:
+                    fallback_text = await self._force_final_answer(temperature)
+                    if fallback_text:
+                        yield {"type": "content", "text": fallback_text}
+                        full_content.append(fallback_text)
+                except Exception:
+                    yield {"type": "content",
+                           "text": "抱歉，回答生成过程中出现异常，请稍后重试或换个问法。"}
         self.stm.add(
             "assistant", "".join(full_content),
             reasoning_content="".join(full_reasoning),
@@ -380,7 +419,7 @@ class AgentSession:
         # 思考策略：复杂问题首轮开启；工具执行后的综合轮始终开启。
         use_thinking = (tool_calls > 0) or enable_thinking
         thinking_payload = {"type": "enabled"} if use_thinking else {"type": "disabled"}
-        max_tok = 8192 if use_thinking else 4096
+        max_tok = 16384 if use_thinking else 4096
 
         content = ""
         native_calls: list[dict] = []
@@ -391,14 +430,14 @@ class AgentSession:
             content, native_calls, reasoning = await achat_completion_with_tools(
                 self.api_key, self.base_url, augmented_messages,
                 self._build_tools_schema(),
-                temperature=temperature, max_tokens=max_tok, timeout=120, retries=1,
+                temperature=temperature, max_tokens=max_tok, timeout=240, retries=1,
                 thinking=thinking_payload,
             )
         except Exception:
             # 原生调用失败时回退到无工具调用（老路径），由下方文本解析兜底
             content = await achat_completion(
                 self.api_key, self.base_url, augmented_messages,
-                temperature=temperature, max_tokens=max_tok, timeout=120, retries=1,
+                temperature=temperature, max_tokens=max_tok, timeout=240, retries=1,
             )
 
         if native_calls:
@@ -423,9 +462,7 @@ class AgentSession:
             for c in native_calls:
                 if not c["name"]:
                     continue
-                result = await asyncio.to_thread(
-                    self._safe_execute_tool, c["name"], c["arguments"]
-                )
+                result = await self._execute_tool_async(c["name"], c["arguments"])
                 self.stm.add("tool", result, tool_name=c["name"], tool_call_id=c["id"])
             return await self._call_llm(temperature, tool_calls + 1, enable_thinking)
 
@@ -444,7 +481,7 @@ class AgentSession:
             if tool_calls >= self.MAX_TOOL_HOPS or call_key in self._seen_tool_calls:
                 return await self._force_final_answer(temperature)
             self._seen_tool_calls.add(call_key)
-            result = await asyncio.to_thread(self._safe_execute_tool, tool_name, params)
+            result = await self._execute_tool_async(tool_name, params)
             self.stm.add("assistant", content)
             self.stm.add("tool", result, tool_name=tool_name)
             return await self._call_llm(temperature, tool_calls + 1, enable_thinking)
@@ -515,7 +552,7 @@ class AgentSession:
 
         content = await achat_completion(
             self.api_key, self.base_url, final_messages,
-            temperature=temperature, max_tokens=4096, timeout=90, retries=1,
+            temperature=temperature, max_tokens=4096, timeout=180, retries=1,
         )
         result = self._extract_answer_block(content)
         if not result:
@@ -523,7 +560,7 @@ class AgentSession:
             final_messages.append({"role": "user", "content": "请把回答放在 ```answer 和 ``` 之间，直接输出回答正文。"})
             content = await achat_completion(
                 self.api_key, self.base_url, final_messages,
-                temperature=temperature, max_tokens=4096, timeout=90, retries=1,
+                temperature=temperature, max_tokens=4096, timeout=180, retries=1,
             )
             result = self._extract_answer_block(content)
         if not result:
@@ -566,16 +603,20 @@ class AgentSession:
         # 思考策略：复杂问题首轮开启；工具执行后的综合轮始终开启。
         use_thinking = (tool_calls > 0) or enable_thinking
         thinking_payload = {"type": "enabled"} if use_thinking else {"type": "disabled"}
-        max_tok = 8192 if use_thinking else 4096
+        max_tok = 16384 if use_thinking else 4096
 
         # ── native function-calling buffers ─────────────────────────────
         native_calls: dict[int, dict] = {}
         is_native_tool_call = False
         reasoning_buf: list[str] = []   # 累积思考内容，多轮需回传
+        reasoning_pending = ""          # 行级过滤思考中的 XML 标签
 
         # Text-fallback streaming state (used when the model emits plain text
-        # instead of native tool_calls).
-        TOOL_DETECT_WINDOW = 400  # chars to inspect before deciding
+        # instead of native tool_calls).  The window is tiny — native tool
+        # calls arrive as structured tool_call events, so content can start
+        # streaming almost immediately (only a bare thinking first line is
+        # buffered a bit longer to avoid leaking it).
+        TOOL_DETECT_WINDOW = 30  # chars before starting to stream content
 
         buffered: list[str] = []
         is_tool_call = False
@@ -623,30 +664,48 @@ class AgentSession:
 
         async def _iter_events() -> AsyncGenerator[dict, None]:
             """Stream native function-calling events, falling back to a plain
-            text stream if the tools request is rejected (e.g. HTTP 400 for a
-            malformed history) — better to answer without tools than to crash.
+            text stream if the tools request fails mid-stream (network drop,
+            timeout, HTTP error, …).  Emits a ``{"type": "fallback"}`` marker
+            so the caller abandons any half-collected tool call and streams
+            the fallback answer instead of silently dropping it.
             """
             try:
                 async for ev in achat_completion_stream_with_tools(
                     self.api_key, self.base_url, augmented_messages,
                     self._build_tools_schema(),
-                    temperature=temperature, max_tokens=max_tok, timeout=120,
+                    temperature=temperature, max_tokens=max_tok, timeout=240,
                     thinking=thinking_payload,
                 ):
                     yield ev
             except Exception:
+                yield {"type": "fallback"}
                 async for ev in _content_events(achat_completion_stream(
                     self.api_key, self.base_url, augmented_messages,
-                    temperature=temperature, max_tokens=max_tok, timeout=120,
+                    temperature=temperature, max_tokens=max_tok, timeout=240,
                 )):
                     yield ev
 
         async for event in _iter_events():
+            if event["type"] == "fallback":
+                # 原生工具流式中断：放弃未完成的工具调用，直接输出 fallback 回答。
+                is_native_tool_call = False
+                native_calls.clear()
+                buffered.clear()
+                reasoning_buf.clear()
+                reasoning_pending = ""
+                continue
+
             if event["type"] == "reasoning":
                 # Thinking chain — surface it to the user AND keep it for
-                # multi-turn replay (DeepSeek requires echoing it back).
+                # multi-turn replay (DeepSeek requires echoing it back).  Filter
+                # out any Claude-style XML tool-call tags the model may emit
+                # inside its thinking.
                 reasoning_buf.append(event["text"])
-                yield {"type": "reasoning", "text": event["text"]}
+                reasoning_pending += event["text"]
+                while "\n" in reasoning_pending:
+                    line, reasoning_pending = reasoning_pending.split("\n", 1)
+                    if not _is_scaffold_line(line):
+                        yield {"type": "reasoning", "text": line + "\n"}
                 continue
 
             if event["type"] == "tool_call":
@@ -695,6 +754,10 @@ class AgentSession:
                 for _d in emit([token]):
                     yield _d
 
+        # Flush any trailing reasoning line (not ending with a newline).
+        if reasoning_pending.strip() and not _is_scaffold_line(reasoning_pending):
+            yield {"type": "reasoning", "text": reasoning_pending}
+
         # ── native tool-call handling ───────────────────────────────────
         if is_native_tool_call:
             calls: list[dict] = []
@@ -731,9 +794,7 @@ class AgentSession:
                              reasoning_content="".join(reasoning_buf))
                 for c in calls:
                     yield {"type": "tool", "name": c["name"]}
-                    result = await asyncio.to_thread(
-                        self._safe_execute_tool, c["name"], c["arguments"]
-                    )
+                    result = await self._execute_tool_async(c["name"], c["arguments"])
                     self.stm.add("tool", result, tool_name=c["name"], tool_call_id=c["id"])
                 async for ev in self._call_llm_stream(temperature, tool_calls + 1, enable_thinking):
                     yield ev
@@ -766,7 +827,7 @@ class AgentSession:
                     return
                 self._seen_tool_calls.add(call_key)
                 yield {"type": "tool", "name": tool_name}
-                result = await asyncio.to_thread(self._safe_execute_tool, tool_name, params)
+                result = await self._execute_tool_async(tool_name, params)
                 self.stm.add("assistant", content)
                 self.stm.add("tool", result, tool_name=tool_name)
                 async for ev in self._call_llm_stream(temperature, tool_calls + 1, enable_thinking):
@@ -842,6 +903,22 @@ class AgentSession:
             return self._execute_tool(name, args)
         except Exception as e:
             return f"[工具执行出错] {type(e).__name__}: {e}"
+
+    async def _execute_tool_async(self, name: str, args: dict,
+                                  timeout: float = 90) -> str:
+        """Run a tool in a worker thread with a hard timeout.
+
+        A slow tool (e.g. multi_agent_search with several nested LLM calls)
+        must never stall the whole turn indefinitely — on timeout we return an
+        error string so the conversation keeps flowing.
+        """
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._safe_execute_tool, name, args),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return f"[工具执行超时] {name} 超过 {int(timeout)}s 未完成，已跳过。"
 
     def _execute_tool(self, tool_name: str, params: dict) -> str:
         """Dispatch *tool_name* to the matching method on self.tools."""

@@ -243,6 +243,8 @@ class Tools:
         自动生成按学期的推荐课程表。
 
         综合考虑：先修关系、开课学期、学分上限（25/学期）、保研核心课前置等约束。
+        排课从学生当前年级的当前学期开始；未提供已修课程时，系统会按年级自动
+        推断低年级课程为已修，不会把低年级基础课重复排入课表。
         """
         if not major or not program_name:
             return "请提供专业和培养方案名称，以便生成课程表。"
@@ -326,12 +328,12 @@ class Tools:
             },
             {
                 "name": "generate_schedule",
-                "description": "【智能排课】根据学生专业、年级、已修课程、培养方案、目标（保研/出国等），自动生成按学期排列的推荐课程表，考虑先修关系、开课学期、学分上限",
+                "description": "【智能排课】根据学生专业、年级、已修课程、培养方案、目标（保研/出国等），自动生成按学期排列的推荐课程表，从学生当前年级开始排课，低年级基础课自动视为已修",
                 "parameters": {
                     "major": {"type": "string", "description": "学生的专业"},
                     "grade": {"type": "string", "description": "年级（大一/大二/大三/大四）"},
                     "program_name": {"type": "string", "description": "培养方案名称"},
-                    "completed_courses": {"type": "string", "description": "已修课程，逗号分隔（如：微积分,线性代数,10421263）"},
+                    "completed_courses": {"type": "string", "description": "已修课程，逗号分隔（如：微积分,线性代数,10421263）；可留空，系统会按年级自动推断低年级课程为已修"},
                     "gpa": {"type": "string", "description": "当前GPA（可选，用于保研评估）"},
                     "goals": {"type": "string", "description": "目标，逗号分隔（如：保研,出国,就业）"},
                     "target_semester": {"type": "string", "description": "开始排课学期（秋/春/夏），默认秋"}

@@ -175,8 +175,24 @@ class CourseScheduler:
             # Fallback: try to find courses by department/program match
             required_ids, elective_ids = self._infer_requirements(program)
 
+        # 1.5) 课程年级映射：按课程在培养方案文本中的出现顺序推断年级(0=大一…3=大四)
+        course_grades = self._build_course_grade_map(program)
+
         # 2) Remove completed courses
+        grade_num = GRADE_TO_NUM.get(student.grade, 1)
         completed_set = self._normalize_completed(student.completed_courses)
+        if not student.completed_courses:
+            # 用户未提供已修课程：按年级自动推断——低年级的课视为已修。
+            inferred = [
+                cid for cid in required_ids + elective_ids
+                if course_grades.get(cid, 0) < grade_num
+            ]
+            if inferred:
+                completed_set.update(inferred)
+                warnings.append(
+                    f"按 {student.grade} 年级的正常修读进度，自动将 {len(inferred)} 门低年级课程视为已修"
+                    f"（示例：{'、'.join(inferred[:3])}…），如需调整请在排课时提供已修课程。"
+                )
         remaining_required = [cid for cid in required_ids if cid not in completed_set]
         remaining_elective = [cid for cid in elective_ids if cid not in completed_set]
 
@@ -194,7 +210,6 @@ class CourseScheduler:
             )
 
         # 4) Run constrained topological sort
-        grade_num = GRADE_TO_NUM.get(student.grade, 1)
         start_semester = self._semester_to_offset(student.target_semester_start)
         total_semesters = self.constraints.total_semesters
 
@@ -203,6 +218,7 @@ class CourseScheduler:
             start_semester_offset=start_semester + grade_num * 3,
             total_semesters=total_semesters,
             max_credits_per_semester=self.constraints.max_credits_per_semester,
+            course_grades=course_grades,
         )
 
         # 5) Apply credit limits and rebalance
@@ -523,10 +539,31 @@ class CourseScheduler:
                 return i
         return 0  # default to 秋
 
+    @staticmethod
+    def _build_course_grade_map(program: TrainingProgram) -> dict[str, int]:
+        """Infer a grade index (0=大一 … 3=大四) for every course id.
+
+        培养方案的课程大致按修读顺序排列（先基础后专业），因此按课程在文本中
+        的出现顺序等分成 4 个年级组。用于：
+        - 自动推断"该年级之前应修完"的课程
+        - 排课时禁止把高年级课排入低年级学期
+        """
+        ids: list[str] = []
+        for m in re.finditer(r"(\d{8})", program.raw_text):
+            cid = m.group(1)
+            if cid not in ids:
+                ids.append(cid)
+        n = len(ids)
+        grades: dict[str, int] = {}
+        for i, cid in enumerate(ids):
+            grades[cid] = min(3, int(i * 4 / n)) if n else 0
+        return grades
+
     def _constrained_topological_sort(self, courses: list[GraphCourse],
                                       start_semester_offset: int = 0,
                                       total_semesters: int = 8,
-                                      max_credits_per_semester: int = 25
+                                      max_credits_per_semester: int = 25,
+                                      course_grades: dict[str, int] = None
                                       ) -> list[list[GraphCourse]]:
         """Topological sort with semester constraints and credit awareness.
 
@@ -552,9 +589,11 @@ class CourseScheduler:
         plan: list[list[GraphCourse]] = []
         taken: set[str] = set()
         all_names: set[str] = set(course_map.keys())
+        course_grades = course_grades or {}
 
         for sem_idx in range(total_semesters):
             target_sem = SEMESTER_CYCLE[(start_semester_offset + sem_idx) % 3]
+            semester_grade = (start_semester_offset + sem_idx) // 3
 
             # Refill queue
             if not queue:
@@ -568,6 +607,7 @@ class CourseScheduler:
             semester_courses: list[GraphCourse] = []
             semester_credits = 0.0
             deferred: deque[str] = deque()
+            grade_deferred: deque[str] = deque()
 
             while queue:
                 name = queue.popleft()
@@ -575,6 +615,10 @@ class CourseScheduler:
                     continue
 
                 course = course_map[name]
+                # 年级适配：高年级的课推迟到对应年级的学期（硬约束）
+                if course_grades.get(course.id, 0) > semester_grade:
+                    grade_deferred.append(name)
+                    continue
                 if not _course_offered_in_semester(course, target_sem):
                     deferred.append(name)
                     continue
@@ -597,7 +641,7 @@ class CourseScheduler:
                             queue.append(other_name)
 
             # Deadlock guard: if the credit cap deferred everything this term,
-            # force one course in — the cap must not stall the whole plan.
+            # force one grade-appropriate course in — the cap is a soft limit.
             if not semester_courses and deferred:
                 name = deferred.popleft()
                 course = course_map.get(name)
@@ -613,6 +657,10 @@ class CourseScheduler:
             # Push deferred back
             while deferred:
                 n = deferred.popleft()
+                if n not in taken:
+                    queue.append(n)
+            while grade_deferred:
+                n = grade_deferred.popleft()
                 if n not in taken:
                     queue.append(n)
 
